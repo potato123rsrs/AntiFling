@@ -1,0 +1,266 @@
+-- Anti-Fling com Desvio v2.1
+-- Para uso em ambiente de cliente. Em executores, execute como script Lua.
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+
+local jogador = Players.LocalPlayer
+if not jogador then
+	warn("Anti-Fling: este código precisa ser executado no cliente.")
+	return
+end
+
+--------------------------------------------------
+-- Ajustes
+--------------------------------------------------
+local HORIZONTAL_MAX = 120    -- seu limite de velocidade pros lados
+local SUBIDA_MAX = 150        -- seu limite de velocidade pra cima
+local GIRO_MAX = 40           -- seu limite de giro
+local SALTO_MAX = 12          -- limite mínimo de deslocamento suspeito (studs)
+local SALTO_POR_SEGUNDO = 180 -- tolerância extra para lag/frame lento
+local TEMPO_TRAVA = 0.25      -- segundos te segurando firme depois do fling
+local DISTANCIA_DESVIO = 3    -- passo pro lado no desvio
+
+
+local COR_DESVIO = Color3.fromRGB(120, 200, 255)
+
+--------------------------------------------------
+-- Estado
+--------------------------------------------------
+local ligado = false
+local personagem, raiz, humanoide, posicaoSegura
+local ultimoEfeito = 0
+local travadoAte = 0
+local camera = workspace.CurrentCamera
+local FOV_NORMAL = camera and camera.FieldOfView or 70
+
+-- Evita duplicar a interface se o script for executado novamente.
+local playerGui = jogador:WaitForChild("PlayerGui")
+local antiga = playerGui:FindFirstChild("AntiFlingGui")
+if antiga then antiga:Destroy() end
+
+local function prepararHumanoide()
+	if not humanoide then return end
+	-- com o anti-fling ligado, você não cai nem vira "boneco de pano"
+	humanoide:SetStateEnabled(Enum.HumanoidStateType.FallingDown, not ligado)
+	humanoide:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, not ligado)
+end
+
+--------------------------------------------------
+-- Botão na tela
+--------------------------------------------------
+local gui = Instance.new("ScreenGui")
+gui.Name = "AntiFlingGui"
+gui.ResetOnSpawn = false
+gui.Parent = playerGui
+
+local botao = Instance.new("TextButton")
+botao.Size = UDim2.fromOffset(160, 44)
+botao.Position = UDim2.new(0, 16, 0.35, 0)
+botao.Font = Enum.Font.GothamBold
+botao.TextSize = 18
+botao.TextColor3 = Color3.new(1, 1, 1)
+botao.Parent = gui
+Instance.new("UICorner", botao).CornerRadius = UDim.new(0, 10)
+
+local function atualizarBotao()
+	botao.Text = ligado and "Anti-Fling: ON" or "Anti-Fling: OFF"
+	botao.BackgroundColor3 = ligado and Color3.fromRGB(40, 170, 90) or Color3.fromRGB(190, 50, 50)
+end
+atualizarBotao()
+
+botao.Activated:Connect(function()
+	ligado = not ligado
+	prepararHumanoide()
+	atualizarBotao()
+end)
+
+--------------------------------------------------
+-- Efeitos do desvio
+--------------------------------------------------
+local function escudo()
+	-- bolha de energia que expande e some
+	local bola = Instance.new("Part")
+	bola.Name = "EscudoDesvio"
+	bola.Shape = Enum.PartType.Ball
+	bola.Size = Vector3.new(5, 5, 5)
+	bola.CFrame = raiz.CFrame
+	bola.Anchored = true
+	bola.CanCollide = false
+	bola.CanTouch = false
+	bola.CanQuery = false
+	bola.CastShadow = false
+	bola.Material = Enum.Material.ForceField
+	bola.Color = COR_DESVIO
+	bola.Parent = workspace
+
+	local info = TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	TweenService:Create(bola, info, {Size = Vector3.new(14, 14, 14), Transparency = 1}):Play()
+	task.delay(0.55, function() bola:Destroy() end)
+end
+
+local function faiscas()
+	local anexo = Instance.new("Attachment")
+	anexo.Parent = raiz
+
+	local p = Instance.new("ParticleEmitter")
+	p.Color = ColorSequence.new(COR_DESVIO)
+	p.LightEmission = 1
+	p.Size = NumberSequence.new(0.4, 0)
+	p.Speed = NumberRange.new(12, 20)
+	p.Lifetime = NumberRange.new(0.3, 0.5)
+	p.SpreadAngle = Vector2.new(180, 180)
+	p.Rate = 0
+	p.Parent = anexo
+	p:Emit(30)
+
+	task.delay(0.6, function() anexo:Destroy() end)
+end
+
+local function brilho()
+	local h = Instance.new("Highlight")
+	h.FillColor = COR_DESVIO
+	h.OutlineColor = Color3.new(1, 1, 1)
+	h.FillTransparency = 0.4
+	h.Parent = personagem
+	TweenService:Create(h, TweenInfo.new(0.6), {FillTransparency = 1, OutlineTransparency = 1}):Play()
+	task.delay(0.7, function() h:Destroy() end)
+end
+
+local function textoDesvio()
+	local cabeca = personagem:FindFirstChild("Head")
+	if not cabeca then return end
+
+	local bb = Instance.new("BillboardGui")
+	bb.Size = UDim2.fromOffset(160, 40)
+	bb.StudsOffset = Vector3.new(0, 2.5, 0)
+	bb.AlwaysOnTop = true
+	bb.Parent = cabeca
+
+	local t = Instance.new("TextLabel")
+	t.Size = UDim2.fromScale(1, 1)
+	t.BackgroundTransparency = 1
+	t.Text = "DESVIOU!"
+	t.Font = Enum.Font.GothamBlack
+	t.TextScaled = true
+	t.TextColor3 = COR_DESVIO
+	t.TextStrokeTransparency = 0
+	t.Parent = bb
+
+	TweenService:Create(bb, TweenInfo.new(0.7), {StudsOffset = Vector3.new(0, 4, 0)}):Play()
+	TweenService:Create(t, TweenInfo.new(0.7), {TextTransparency = 1, TextStrokeTransparency = 1}):Play()
+	task.delay(0.8, function() bb:Destroy() end)
+end
+
+local function puloCamera()
+	camera = workspace.CurrentCamera
+	if not camera then return end
+	FOV_NORMAL = camera.FieldOfView
+	TweenService:Create(camera, TweenInfo.new(0.08), {FieldOfView = FOV_NORMAL + 12}):Play()
+	task.delay(0.08, function()
+		local camAtual = workspace.CurrentCamera
+		if camAtual then
+			TweenService:Create(camAtual, TweenInfo.new(0.3), {FieldOfView = FOV_NORMAL}):Play()
+		end
+	end)
+end
+
+local function efeitoDesvio()
+	escudo()
+	faiscas()
+	brilho()
+	textoDesvio()
+	puloCamera()
+end
+
+--------------------------------------------------
+-- Personagem (acompanha o respawn)
+--------------------------------------------------
+local function novoPersonagem(char)
+	raiz = nil
+	personagem = char
+	humanoide = char:WaitForChild("Humanoid")
+	raiz = char:WaitForChild("HumanoidRootPart")
+	posicaoSegura = raiz.CFrame
+	travadoAte = 0
+	prepararHumanoide()
+end
+
+if jogador.Character then novoPersonagem(jogador.Character) end
+jogador.CharacterAdded:Connect(novoPersonagem)
+
+--------------------------------------------------
+-- Cancelar o fling
+--------------------------------------------------
+local function cancelar()
+	if not raiz or not raiz.Parent or not humanoide or not posicaoSegura then return end
+	raiz.AssemblyLinearVelocity = Vector3.zero
+	raiz.AssemblyAngularVelocity = Vector3.zero
+	raiz.CFrame = posicaoSegura
+	humanoide.PlatformStand = false
+
+	-- se o fling te derrubou, levanta na hora
+	local estado = humanoide:GetState()
+	if estado == Enum.HumanoidStateType.FallingDown
+		or estado == Enum.HumanoidStateType.Ragdoll
+		or estado == Enum.HumanoidStateType.Physics then
+		humanoide:ChangeState(Enum.HumanoidStateType.GettingUp)
+	end
+end
+
+local function checar(dt)
+	if not raiz or not raiz.Parent or not humanoide or humanoide.Health <= 0 then return end
+
+	local vel = raiz.AssemblyLinearVelocity
+	local giro = raiz.AssemblyAngularVelocity
+	local pos = raiz.Position
+
+	-- valores "quebrados" (infinito/NaN) são o que faz o personagem bugar
+	local quebrado = not (vel.Magnitude < math.huge
+		and giro.Magnitude < math.huge
+		and pos.Magnitude < math.huge)
+
+	-- desligado ou sentado (carro, cadeira): só guarda a posição
+	if not ligado or humanoide.SeatPart then
+		if not quebrado then posicaoSegura = raiz.CFrame end
+		return
+	end
+
+	local horizontal = Vector3.new(vel.X, 0, vel.Z).Magnitude
+	-- Aumenta a tolerância em frames lentos para reduzir falsos positivos por lag.
+	local salto = (pos - posicaoSegura.Position).Magnitude
+	local limiteSalto = math.max(SALTO_MAX, (dt or 1/60) * SALTO_POR_SEGUNDO + 4)
+	local flingado = quebrado
+		or horizontal > HORIZONTAL_MAX
+		or vel.Y > SUBIDA_MAX
+		or giro.Magnitude > GIRO_MAX
+		or salto > limiteSalto
+
+	local agora = os.clock()
+
+	if flingado then
+		if agora - ultimoEfeito > 0.8 then
+			ultimoEfeito = agora
+			local lado = math.random(0, 1) == 0 and -1 or 1
+			posicaoSegura = posicaoSegura * CFrame.new(lado * DISTANCIA_DESVIO, 0, 0)
+			cancelar()
+			efeitoDesvio()
+		else
+			cancelar()
+		end
+		travadoAte = agora + TEMPO_TRAVA
+	elseif agora < travadoAte then
+		cancelar() -- segura firme mais um pouquinho pro empurrão não voltar
+	else
+		posicaoSegura = raiz.CFrame
+	end
+end
+
+--------------------------------------------------
+-- Uma única verificação por frame para evitar correções duplicadas.
+-- Alterar CanCollide de outros jogadores foi removido: isso não é confiável
+-- em cliente e poderia deixar as colisões deles alteradas.
+--------------------------------------------------
+RunService.Heartbeat:Connect(function(dt)
+	checar(dt)
+end)
