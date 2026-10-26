@@ -1,267 +1,1183 @@
-
--- Anti-Fling + Soco
--- Delta / Roblox mobile
--- Fling defensivo + contra-ataque visual
--- O efeito local nao garante knockback replicado.
+-- Anti-Fling + ESQUIVO! (Aura)
+-- Digite /AuraOn no chat pra ligar e /AuraOff pra desligar.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local UIS = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
-local Debris = game:GetService("Debris")
-local Workspace = game:GetService("Workspace")
+local Lighting = game:GetService("Lighting")
+local SoundService = game:GetService("SoundService")
+local TextChatService = game:GetService("TextChatService")
 
-local LP = Players.LocalPlayer
-local PG = LP:WaitForChild("PlayerGui")
+local jogador = Players.LocalPlayer
+if not jogador then
+	warn("Anti-Fling: precisa rodar no cliente.")
+	return
+end
 
-local old = PG:FindFirstChild("AntiFlingSoco")
-if old then old:Destroy() end
+if _G.AntiFlingEsquivoParar then
+	pcall(_G.AntiFlingEsquivoParar)
+end
 
-local antiOn = false
-local punchOn = false
-local lastPunch = 0
-local cooldown = 0.7
-local char, hum, root
-local safePivot
+--------------------------------------------------
+-- Ajustes
+--------------------------------------------------
+local HORIZONTAL_MAX = 120
+local SUBIDA_MAX = 150
+local GIRO_MAX = 40
+local SALTO_MAX = 12
+local SALTO_POR_SEGUNDO = 180
+local VEL_TELEPORTE = 60
+local TEMPO_TRAVA = 0.25
+local MARGEM_VOID = 40
 
+local DIST_FLINGER = 8
+local ESPERA_ESQUIVO = 0.9
+local DISTANCIA_DESVIO = 7
+local DURACAO_DESVIO = 0.4
+local ALTURA_PULO = 2.2
+local ACROBACIA = true
+
+local BLOQUEAR_FLINGER = true
+local GIRO_FLINGER = 50
+local VEL_FLINGER = 250
+
+local COR = Color3.fromRGB(120, 200, 255)
+local SOM_ESQUIVO = ""
+
+--------------------------------------------------
+-- ANIMAÇÕES AURA (ATUALIZADAS)
+--------------------------------------------------
+local TROCAR_ANIMACOES = true
+
+local ANIMACOES_AURA = {
+	idle = {
+		Animation1 = 616006778,
+		Animation2 = 616008087
+	}, -- Levitation: flutuando parado
+
+	walk = 707897309,     -- Mage: andando
+	run = 707861613,      -- Mage: correndo
+	jump = 616115533,     -- Superhero: pulo
+	fall = 616005863,     -- Levitation: caindo flutuando
+	climb = 616104706,    -- Superhero: escalando
+	swim = 616011509,     -- Levitation: nadando
+	swimidle = 616012453, -- Levitation: parado na água
+}
+
+--------------------------------------------------
+-- Estado
+--------------------------------------------------
+local ligado = false
+local personagem, raiz, humanoide
+local posicaoSegura, posicaoChao
+local ultimoEfeito = 0
+local travadoAte = 0
+local desvio = nil
+local rastro = nil
+local FOV_BASE = workspace.CurrentCamera
+	and workspace.CurrentCamera.FieldOfView or 70
+
+local function suave(t)
+	t = math.clamp(t, 0, 1)
+	return t * t * (3 - 2 * t)
+end
+
+local conexoes = {}
+
+local function conectar(sinal, funcao)
+	local c = sinal:Connect(funcao)
+	table.insert(conexoes, c)
+	return c
+end
+
+local function prepararHumanoide()
+	if not humanoide then return end
+
+	humanoide:SetStateEnabled(
+		Enum.HumanoidStateType.FallingDown,
+		not ligado
+	)
+	humanoide:SetStateEnabled(
+		Enum.HumanoidStateType.Ragdoll,
+		not ligado
+	)
+end
+
+--------------------------------------------------
+-- Aplicar e restaurar animações
+--------------------------------------------------
+local idsOriginais = setmetatable({}, {__mode = "k"})
+
+local function aplicarAnimacoes(ativar)
+	if not TROCAR_ANIMACOES then return end
+
+	local char, hum = personagem, humanoide
+	if not char or not hum
+		or hum.RigType ~= Enum.HumanoidRigType.R15 then
+		return
+	end
+
+	local animate = char:WaitForChild("Animate", 5)
+	if not animate then return end
+
+	local mudou = false
+
+	for nome, id in pairs(ANIMACOES_AURA) do
+		local pasta = animate:FindFirstChild(nome)
+
+		if pasta then
+			for _, anim in ipairs(pasta:GetChildren()) do
+				if anim:IsA("Animation") then
+					local novoId
+
+					if type(id) == "table" then
+						novoId = id[anim.Name]
+					else
+						novoId = id
+					end
+
+					if novoId and ativar then
+						if idsOriginais[anim] == nil then
+							idsOriginais[anim] = anim.AnimationId
+						end
+
+						anim.AnimationId =
+							"rbxassetid://" .. tostring(novoId)
+
+						mudou = true
+
+					elseif not ativar and idsOriginais[anim] then
+						anim.AnimationId = idsOriginais[anim]
+						idsOriginais[anim] = nil
+						mudou = true
+					end
+				end
+			end
+		end
+	end
+
+	if not mudou then return end
+
+	local animator = hum:FindFirstChildOfClass("Animator")
+
+	if animator then
+		for _, trilha in ipairs(
+			animator:GetPlayingAnimationTracks()
+		) do
+			local p = trilha.Priority
+
+			if p == Enum.AnimationPriority.Core
+				or p == Enum.AnimationPriority.Idle
+				or p == Enum.AnimationPriority.Movement then
+				trilha:Stop(0.15)
+			end
+		end
+	end
+
+	pcall(function()
+		animate.Disabled = true
+		task.wait()
+		animate.Disabled = false
+	end)
+end
+
+--------------------------------------------------
+-- Interface
+--------------------------------------------------
 local gui = Instance.new("ScreenGui")
-gui.Name = "AntiFlingSoco"
+gui.Name = "AntiFlingEsquivo"
 gui.ResetOnSpawn = false
-gui.DisplayOrder = 9999
-gui.Parent = PG
+gui.IgnoreGuiInset = true
+gui.DisplayOrder = 50
+gui.Parent = jogador:WaitForChild("PlayerGui")
 
-local panel = Instance.new("Frame")
-panel.Size = UDim2.fromOffset(245, 165)
-panel.Position = UDim2.new(0, 15, 0.35, 0)
-panel.BackgroundColor3 = Color3.fromRGB(24, 27, 38)
-panel.BorderSizePixel = 0
-panel.Parent = gui
+local aviso = Instance.new("TextLabel")
+aviso.AnchorPoint = Vector2.new(0.5, 0)
+aviso.Position = UDim2.fromScale(0.5, 0.08)
+aviso.Size = UDim2.fromScale(0.4, 0.06)
+aviso.BackgroundTransparency = 1
+aviso.Font = Enum.Font.GothamBlack
+aviso.TextScaled = true
+aviso.TextColor3 = COR
+aviso.TextTransparency = 1
+aviso.ZIndex = 6
+aviso.Parent = gui
 
-Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 12)
+local avisoContorno = Instance.new("UIStroke")
+avisoContorno.Thickness = 2
+avisoContorno.Color = Color3.fromRGB(10, 30, 60)
+avisoContorno.Transparency = 1
+avisoContorno.Parent = aviso
 
-local title = Instance.new("TextLabel")
-title.Size = UDim2.new(1, 0, 0, 32)
-title.BackgroundTransparency = 1
-title.Text = "ANTI-FLING + SOCO"
-title.TextColor3 = Color3.new(1, 1, 1)
-title.Font = Enum.Font.GothamBold
-title.TextSize = 15
-title.Parent = panel
+local function mostrarAviso(texto, cor)
+	aviso.Text = texto
+	aviso.TextColor3 = cor
+	aviso.TextTransparency = 0
+	avisoContorno.Transparency = 0
 
-local function makeButton(text, y)
-    local b = Instance.new("TextButton")
-    b.Size = UDim2.new(1, -20, 0, 42)
-    b.Position = UDim2.fromOffset(10, y)
-    b.BackgroundColor3 = Color3.fromRGB(60, 64, 80)
-    b.TextColor3 = Color3.new(1, 1, 1)
-    b.Font = Enum.Font.GothamBold
-    b.TextSize = 14
-    b.Text = text
-    b.Parent = panel
-    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 8)
-    return b
+	task.delay(1.5, function()
+		if aviso.Text ~= texto then return end
+
+		TweenService:Create(
+			aviso,
+			TweenInfo.new(0.4),
+			{TextTransparency = 1}
+		):Play()
+
+		TweenService:Create(
+			avisoContorno,
+			TweenInfo.new(0.4),
+			{Transparency = 1}
+		):Play()
+	end)
 end
 
-local flingBtn = makeButton("Ativar Fling: OFF", 38)
-local punchBtn = makeButton("Ativar Soco: OFF", 87)
+local function definirAura(valor)
+	ligado = valor
+	prepararHumanoide()
+	task.spawn(aplicarAnimacoes, valor)
 
-local info = Instance.new("TextLabel")
-info.Position = UDim2.fromOffset(6, 133)
-info.Size = UDim2.new(1, -12, 0, 25)
-info.BackgroundTransparency = 1
-info.Text = "Pronto"
-info.TextColor3 = Color3.fromRGB(205, 210, 225)
-info.TextSize = 11
-info.Font = Enum.Font.Gotham
-info.Parent = panel
-
-local function updateButtons()
-    flingBtn.Text = "Ativar Fling: " .. (antiOn and "ON" or "OFF")
-    flingBtn.BackgroundColor3 = antiOn
-        and Color3.fromRGB(35, 140, 90)
-        or Color3.fromRGB(60, 64, 80)
-
-    punchBtn.Text = "Ativar Soco: " .. (punchOn and "ON" or "OFF")
-    punchBtn.BackgroundColor3 = punchOn
-        and Color3.fromRGB(190, 65, 50)
-        or Color3.fromRGB(60, 64, 80)
+	if valor then
+		mostrarAviso("✦ AURA ON ✦", COR)
+	else
+		mostrarAviso(
+			"AURA OFF",
+			Color3.fromRGB(255, 110, 110)
+		)
+	end
 end
 
-local function bindCharacter(c)
-    char = c
-    hum = c:WaitForChild("Humanoid")
-    root = c:WaitForChild("HumanoidRootPart")
-    safePivot = c:GetPivot()
+--------------------------------------------------
+-- Comandos de chat
+--------------------------------------------------
+local ultimoComando = 0
+
+local function lerComando(mensagem)
+	local m = mensagem:lower():gsub("%s", "")
+
+	if m ~= "/auraon" and m ~= "/auraoff" then
+		return
+	end
+
+	if os.clock() - ultimoComando < 0.3 then
+		return
+	end
+
+	ultimoComando = os.clock()
+	definirAura(m == "/auraon")
 end
 
-if LP.Character then
-    task.spawn(bindCharacter, LP.Character)
-end
-LP.CharacterAdded:Connect(bindCharacter)
-
-flingBtn.Activated:Connect(function()
-    antiOn = not antiOn
-    info.Text = antiOn and "Protecao ativada" or "Protecao desligada"
-    updateButtons()
+conectar(TextChatService.SendingMessage, function(mensagem)
+	lerComando(mensagem.Text)
 end)
 
-punchBtn.Activated:Connect(function()
-    punchOn = not punchOn
-    info.Text = punchOn and "Contra-ataque ativado" or "Contra-ataque desligado"
-    updateButtons()
-end)
+conectar(jogador.Chatted, lerComando)
 
--- Protege seu personagem contra velocidades e giros extremos.
-RunService.Heartbeat:Connect(function()
-    if not antiOn or not char or not char.Parent
-    or not root or not root.Parent then
-        return
-    end
+--------------------------------------------------
+-- Efeitos de tela
+--------------------------------------------------
+local flash = Instance.new("Frame")
+flash.Size = UDim2.fromScale(1, 1)
+flash.BackgroundColor3 = Color3.new(1, 1, 1)
+flash.BackgroundTransparency = 1
+flash.BorderSizePixel = 0
+flash.ZIndex = 1
+flash.Parent = gui
 
-    local speed = root.AssemblyLinearVelocity.Magnitude
-    local spin = root.AssemblyAngularVelocity.Magnitude
+local function piscar(forca, duracao)
+	flash.BackgroundTransparency = 1 - forca
 
-    if speed > 180 or spin > 150 or root.Position.Y < -100 then
-        pcall(function()
-            root.AssemblyLinearVelocity = Vector3.zero
-            root.AssemblyAngularVelocity = Vector3.zero
-        end)
-
-        if safePivot and (
-            (root.Position - safePivot.Position).Magnitude > 45
-            or root.Position.Y < -100
-        ) then
-            pcall(function()
-                char:PivotTo(safePivot)
-            end)
-        end
-
-        if hum then
-            pcall(function()
-                hum.Sit = false
-                hum:ChangeState(Enum.HumanoidStateType.GettingUp)
-            end)
-        end
-
-        info.Text = "Movimento anormal detectado"
-    elseif speed < 80 and spin < 60 and root.Position.Y > -80 then
-        safePivot = char:GetPivot()
-    end
-end)
-
--- Busca um jogador proximo e na frente.
-local function findTarget()
-    if not root then return nil end
-
-    local best, bestDistance = nil, 10
-
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LP and p.Character then
-            local th = p.Character:FindFirstChildOfClass("Humanoid")
-            local tr = p.Character:FindFirstChild("HumanoidRootPart")
-
-            if th and tr and th.Health > 0 then
-                local delta = tr.Position - root.Position
-                local distance = delta.Magnitude
-
-                if distance > 0 and distance < bestDistance then
-                    if root.CFrame.LookVector:Dot(delta.Unit) > 0.1 then
-                        best = p
-                        bestDistance = distance
-                    end
-                end
-            end
-        end
-    end
-
-    return best
+	TweenService:Create(
+		flash,
+		TweenInfo.new(duracao),
+		{BackgroundTransparency = 1}
+	):Play()
 end
 
-local function punchEffect(target)
-    local tr = target.Character
-        and target.Character:FindFirstChild("HumanoidRootPart")
-    if not tr then return end
+local texto = Instance.new("TextLabel")
+texto.AnchorPoint = Vector2.new(0.5, 0.5)
+texto.Position = UDim2.fromScale(0.5, 0.3)
+texto.Size = UDim2.fromScale(0.65, 0.14)
+texto.BackgroundTransparency = 1
+texto.Font = Enum.Font.GothamBlack
+texto.TextScaled = true
+texto.Text = "ESQUIVO!"
+texto.TextColor3 = Color3.new(1, 1, 1)
+texto.TextTransparency = 1
+texto.ZIndex = 5
+texto.Parent = gui
 
-    local hl = Instance.new("Highlight")
-    hl.Adornee = target.Character
-    hl.FillColor = Color3.fromRGB(255, 45, 35)
-    hl.OutlineColor = Color3.fromRGB(255, 220, 100)
-    hl.FillTransparency = 0.3
-    hl.Parent = Workspace
-    Debris:AddItem(hl, 0.5)
+local gradiente = Instance.new("UIGradient")
+gradiente.Color = ColorSequence.new(
+	Color3.new(1, 1, 1),
+	COR
+)
+gradiente.Rotation = 90
+gradiente.Parent = texto
 
-    local ring = Instance.new("Part")
-    ring.Shape = Enum.PartType.Ball
-    ring.Size = Vector3.new(1, 1, 1)
-    ring.CFrame = tr.CFrame
-    ring.Anchored = true
-    ring.CanCollide = false
-    ring.CanTouch = false
-    ring.Material = Enum.Material.Neon
-    ring.Color = Color3.fromRGB(255, 75, 35)
-    ring.Transparency = 0.15
-    ring.Parent = Workspace
+local contorno = Instance.new("UIStroke")
+contorno.Thickness = 3
+contorno.Color = Color3.fromRGB(10, 30, 60)
+contorno.Transparency = 1
+contorno.Parent = texto
 
-    TweenService:Create(
-        ring,
-        TweenInfo.new(0.35, Enum.EasingStyle.Quad),
-        {
-            Size = Vector3.new(9, 9, 9),
-            Transparency = 1
-        }
-    ):Play()
-    Debris:AddItem(ring, 0.4)
+local escala = Instance.new("UIScale")
+escala.Parent = texto
 
-    local camera = Workspace.CurrentCamera
-    if camera then
-        local oldFov = camera.FieldOfView
-        TweenService:Create(camera, TweenInfo.new(0.1), {
-            FieldOfView = math.min(oldFov + 5, 90)
-        }):Play()
+local eco = texto:Clone()
+eco.ZIndex = 4
+eco.Parent = gui
 
-        task.delay(0.15, function()
-            if camera and camera.Parent then
-                TweenService:Create(camera, TweenInfo.new(0.2), {
-                    FieldOfView = oldFov
-                }):Play()
-            end
-        end)
-    end
+local ecoContorno = eco:FindFirstChildOfClass("UIStroke")
+local ecoEscala = eco:FindFirstChildOfClass("UIScale")
 
-    info.Text = "Impacto visual: " .. target.Name
+local ultimoTexto = nil
+
+local function mostrarEsquivo()
+	local lado = math.random(0, 1) == 0 and -1 or 1
+	local id = {}
+	ultimoTexto = id
+
+	texto.TextTransparency = 0
+	contorno.Transparency = 0
+	texto.Rotation = -12 * lado
+	texto.Position = UDim2.fromScale(
+		0.5 + 0.06 * lado,
+		0.3
+	)
+	escala.Scale = 2.3
+
+	local pop = TweenInfo.new(
+		0.22,
+		Enum.EasingStyle.Back,
+		Enum.EasingDirection.Out
+	)
+
+	TweenService:Create(
+		escala,
+		pop,
+		{Scale = 1}
+	):Play()
+
+	TweenService:Create(
+		texto,
+		pop,
+		{
+			Rotation = -4 * lado,
+			Position = UDim2.fromScale(0.5, 0.3)
+		}
+	):Play()
+
+	task.delay(0.15, function()
+		if ultimoTexto ~= id then return end
+
+		eco.Rotation = -4 * lado
+		eco.Position = texto.Position
+		eco.TextTransparency = 0.2
+		ecoContorno.Transparency = 0.4
+		ecoEscala.Scale = 1
+
+		local info = TweenInfo.new(
+			0.45,
+			Enum.EasingStyle.Quad,
+			Enum.EasingDirection.Out
+		)
+
+		TweenService:Create(
+			ecoEscala,
+			info,
+			{Scale = 1.9}
+		):Play()
+
+		TweenService:Create(
+			eco,
+			info,
+			{TextTransparency = 1}
+		):Play()
+
+		TweenService:Create(
+			ecoContorno,
+			info,
+			{Transparency = 1}
+		):Play()
+	end)
+
+	task.delay(0.75, function()
+		if ultimoTexto ~= id then return end
+
+		local info = TweenInfo.new(
+			0.35,
+			Enum.EasingStyle.Quad,
+			Enum.EasingDirection.In
+		)
+
+		TweenService:Create(
+			texto,
+			info,
+			{
+				TextTransparency = 1,
+				Position = UDim2.fromScale(0.5, 0.24)
+			}
+		):Play()
+
+		TweenService:Create(
+			contorno,
+			info,
+			{Transparency = 1}
+		):Play()
+	end)
 end
 
-local function tryPunch()
-    if not punchOn or os.clock() - lastPunch < cooldown then
-        return
-    end
-    lastPunch = os.clock()
+--------------------------------------------------
+-- Tremor de câmera
+--------------------------------------------------
+local tremorForca, tremorDur, tremorAte = 0, 1, 0
+local offsetAnterior = CFrame.identity
 
-    local target = findTarget()
-    if target then
-        punchEffect(target)
-    else
-        info.Text = "Nenhum alvo proximo a frente"
-    end
+local function tremer(forca, duracao)
+	tremorForca = forca
+	tremorDur = duracao
+	tremorAte = os.clock() + duracao
 end
 
-UIS.InputBegan:Connect(function(input, processed)
-    if not punchOn then return end
+RunService:BindToRenderStep(
+	"AF_Esquivo_Desfaz",
+	Enum.RenderPriority.Camera.Value - 1,
+	function()
+		local cam = workspace.CurrentCamera
 
-    if input.UserInputType == Enum.UserInputType.MouseButton1
-    or input.UserInputType == Enum.UserInputType.Touch then
-        -- Ignora toques nos botoes do painel.
-        local pos = input.Position
-        local objects = PG:GetGuiObjectsAtPosition(pos.X, pos.Y)
-        for _, obj in ipairs(objects) do
-            if obj:IsDescendantOf(panel) then
-                return
-            end
-        end
+		if cam and offsetAnterior ~= CFrame.identity then
+			cam.CFrame = cam.CFrame * offsetAnterior:Inverse()
+		end
 
-        tryPunch()
-    end
-end)
+		offsetAnterior = CFrame.identity
+	end
+)
 
-updateButtons()
-print("Anti-Fling + Soco carregado")
+RunService:BindToRenderStep(
+	"AF_Esquivo_Tremor",
+	Enum.RenderPriority.Camera.Value + 2,
+	function()
+		local cam = workspace.CurrentCamera
+		local restante = tremorAte - os.clock()
+
+		if not cam or restante <= 0 then return end
+
+		local f = tremorForca * (restante / tremorDur)
+
+		local offset = CFrame.Angles(
+			(math.random() - 0.5) * f,
+			(math.random() - 0.5) * f,
+			(math.random() - 0.5) * f * 0.5
+		)
+
+		cam.CFrame = cam.CFrame * offset
+		offsetAnterior = offset
+	end
+)
+
+local function puloCamera()
+	local cam = workspace.CurrentCamera
+	if not cam then return end
+
+	TweenService:Create(
+		cam,
+		TweenInfo.new(0.08),
+		{FieldOfView = FOV_BASE + 14}
+	):Play()
+
+	task.delay(0.08, function()
+		local c = workspace.CurrentCamera
+
+		if c then
+			TweenService:Create(
+				c,
+				TweenInfo.new(0.35),
+				{FieldOfView = FOV_BASE}
+			):Play()
+		end
+	end)
+end
+
+--------------------------------------------------
+-- Efeitos no mundo
+--------------------------------------------------
+local function tocarSom(id, volume)
+	if id == "" then return end
+
+	local s = Instance.new("Sound")
+	s.SoundId = id
+	s.Volume = volume or 1
+	s.Parent = SoundService
+	s:Play()
+
+	task.delay(4, function()
+		s:Destroy()
+	end)
+end
+
+local function parteEfeito()
+	local p = Instance.new("Part")
+	p.Anchored = true
+	p.CanCollide = false
+	p.CanTouch = false
+	p.CanQuery = false
+	p.CastShadow = false
+	p.Material = Enum.Material.Neon
+	p.Color = COR
+	return p
+end
+
+local function anel(cf, raioFinal, duracao)
+	local N = 14
+	local info = TweenInfo.new(
+		duracao,
+		Enum.EasingStyle.Quad,
+		Enum.EasingDirection.Out
+	)
+
+	for i = 1, N do
+		local ang = (i / N) * math.pi * 2
+		local giro = CFrame.Angles(0, -ang, 0)
+
+		local dirLocal = Vector3.new(
+			math.cos(ang), 0, math.sin(ang)
+		)
+
+		local p = parteEfeito()
+		p.Size = Vector3.new(
+			0.3, 0.3, 2 * math.pi * 0.6 / N * 1.2
+		)
+
+		p.CFrame = cf * CFrame.new(dirLocal * 0.6) * giro
+		p.Transparency = 0.1
+		p.Parent = workspace
+
+		TweenService:Create(
+			p,
+			info,
+			{
+				CFrame = cf
+					* CFrame.new(dirLocal * raioFinal)
+					* giro,
+				Size = Vector3.new(
+					0.15, 0.15,
+					2 * math.pi * raioFinal / N * 1.2
+				),
+				Transparency = 1
+			}
+		):Play()
+
+		task.delay(duracao + 0.05, function()
+			p:Destroy()
+		end)
+	end
+end
+
+local function faiscas(posicao, quantidade, velocidade)
+	local anexo = Instance.new("Attachment")
+	anexo.Position = posicao
+	anexo.Parent = workspace.Terrain
+
+	local p = Instance.new("ParticleEmitter")
+	p.Color = ColorSequence.new(COR)
+	p.LightEmission = 1
+	p.Size = NumberSequence.new(0.35, 0)
+	p.Speed = NumberRange.new(
+		velocidade * 0.6,
+		velocidade
+	)
+	p.Lifetime = NumberRange.new(0.25, 0.5)
+	p.SpreadAngle = Vector2.new(180, 180)
+	p.Drag = 4
+	p.Rate = 0
+	p.Parent = anexo
+	p:Emit(quantidade)
+
+	task.delay(0.8, function()
+		anexo:Destroy()
+	end)
+end
+
+local function filtroRapido(duracao)
+	local cc = Instance.new("ColorCorrectionEffect")
+	cc.Saturation = -0.8
+	cc.Contrast = 0.2
+	cc.TintColor = Color3.fromRGB(210, 230, 255)
+	cc.Parent = Lighting
+
+	local blur = Instance.new("BlurEffect")
+	blur.Size = 6
+	blur.Parent = Lighting
+
+	local info = TweenInfo.new(
+		duracao,
+		Enum.EasingStyle.Quad,
+		Enum.EasingDirection.In
+	)
+
+	TweenService:Create(
+		cc,
+		info,
+		{
+			Saturation = 0,
+			Contrast = 0,
+			TintColor = Color3.new(1, 1, 1)
+		}
+	):Play()
+
+	TweenService:Create(
+		blur,
+		info,
+		{Size = 0}
+	):Play()
+
+	task.delay(duracao + 0.05, function()
+		cc:Destroy()
+		blur:Destroy()
+	end)
+end
+
+--------------------------------------------------
+-- Personagem e rastro
+--------------------------------------------------
+local function criarRastro()
+	local a0 = Instance.new("Attachment")
+	a0.Position = Vector3.new(0, 1.2, 0)
+	a0.Parent = raiz
+
+	local a1 = Instance.new("Attachment")
+	a1.Position = Vector3.new(0, -1.2, 0)
+	a1.Parent = raiz
+
+	local t = Instance.new("Trail")
+	t.Attachment0 = a0
+	t.Attachment1 = a1
+	t.Color = ColorSequence.new(COR)
+	t.Transparency = NumberSequence.new(0.3, 1)
+	t.LightEmission = 1
+	t.Lifetime = 0.25
+	t.FaceCamera = true
+	t.Enabled = false
+	t.Parent = raiz
+
+	rastro = t
+end
+
+local function novoPersonagem(char)
+	raiz = nil
+	desvio = nil
+	personagem = char
+
+	humanoide = char:WaitForChild("Humanoid")
+	raiz = char:WaitForChild("HumanoidRootPart")
+
+	posicaoSegura = raiz.CFrame
+	posicaoChao = nil
+	travadoAte = 0
+
+	criarRastro()
+	prepararHumanoide()
+
+	if ligado then
+		task.spawn(aplicarAnimacoes, true)
+	end
+end
+
+if jogador.Character then
+	task.spawn(novoPersonagem, jogador.Character)
+end
+
+conectar(jogador.CharacterAdded, novoPersonagem)
+
+--------------------------------------------------
+-- Sistema de esquiva
+--------------------------------------------------
+local params = RaycastParams.new()
+params.FilterType = Enum.RaycastFilterType.Exclude
+
+local function filtrar(extra)
+	local lista = {}
+
+	if personagem then
+		table.insert(lista, personagem)
+	end
+
+	if extra then
+		table.insert(lista, extra)
+	end
+
+	params.FilterDescendantsInstances = lista
+end
+
+local function pontoLivre(origem, direcao, distancia)
+	if workspace:Raycast(
+		origem,
+		direcao * (distancia + 1.5),
+		params
+	) then
+		return nil
+	end
+
+	local destino = origem + direcao * distancia
+
+	if not workspace:Raycast(
+		destino,
+		Vector3.new(0, -15, 0),
+		params
+	) then
+		return nil
+	end
+
+	return destino
+end
+
+local marcados = {}
+
+local function ameacaProxima(posicao)
+	local melhor, melhorDist = nil, 25
+
+	for _, outro in ipairs(Players:GetPlayers()) do
+		local char = outro ~= jogador and outro.Character
+		local r = char and char:FindFirstChild("HumanoidRootPart")
+
+		if r then
+			local d = (r.Position - posicao).Magnitude
+
+			if marcados[char] then
+				d *= 0.5
+			end
+
+			if d < melhorDist then
+				melhor = char
+				melhorDist = d
+			end
+		end
+	end
+
+	return melhor
+end
+
+local function flingerPerto(posicao)
+	local agora = os.clock()
+
+	for char, quando in pairs(marcados) do
+		local r = char.Parent
+			and char:FindFirstChild("HumanoidRootPart")
+
+		if r and agora - quando < 0.5
+			and (r.Position - posicao).Magnitude < DIST_FLINGER then
+			return char
+		end
+	end
+
+	return nil
+end
+
+local function iniciarEsquivo(ameacaForcada)
+	local de = posicaoSegura
+	local origem = de.Position
+	local ameaca = ameacaForcada or ameacaProxima(origem)
+	local ameacaRaiz = ameaca
+		and ameaca:FindFirstChild("HumanoidRootPart")
+
+	filtrar(ameaca)
+
+	local frente
+
+	if ameacaRaiz then
+		local plano = (
+			ameacaRaiz.Position - origem
+		) * Vector3.new(1, 0, 1)
+
+		if plano.Magnitude > 0.1 then
+			frente = plano.Unit
+		end
+	end
+
+	if not frente then
+		local olhar = de.LookVector * Vector3.new(1, 0, 1)
+
+		frente = olhar.Magnitude > 0.1
+			and olhar.Unit
+			or Vector3.new(0, 0, -1)
+	end
+
+	local direita = frente:Cross(Vector3.yAxis)
+	local lado = math.random(0, 1) == 0 and -1 or 1
+
+	local destino, direcao = origem, nil
+
+	for _, d in ipairs({
+		direita * lado,
+		direita * -lado,
+		-frente
+	}) do
+		local p = pontoLivre(origem, d, DISTANCIA_DESVIO)
+
+		if p then
+			destino = p
+			direcao = d
+			break
+		end
+	end
+
+	local alvoOlhar = destino + frente
+
+	if ameacaRaiz then
+		alvoOlhar = Vector3.new(
+			ameacaRaiz.Position.X,
+			destino.Y,
+			ameacaRaiz.Position.Z
+		)
+	end
+
+	local para = (alvoOlhar - destino).Magnitude > 0.1
+		and CFrame.lookAt(destino, alvoOlhar)
+		or (CFrame.new(destino) * de.Rotation)
+
+	local eixo, sinal = "y", lado
+
+	if direcao then
+		local lateral = para.RightVector:Dot(direcao)
+		local frontal = para.LookVector:Dot(direcao)
+
+		if math.abs(lateral) >= math.abs(frontal) then
+			eixo = "z"
+			sinal = lateral > 0 and -1 or 1
+		else
+			eixo = "x"
+			sinal = frontal < 0 and 1 or -1
+		end
+	end
+
+	desvio = {
+		de = de,
+		para = para,
+		inicio = os.clock(),
+		eixo = eixo,
+		sinal = sinal
+	}
+
+	local chao = workspace:Raycast(
+		origem,
+		Vector3.new(0, -15, 0),
+		params
+	)
+
+	local pe = chao
+		and (chao.Position + Vector3.new(0, 0.15, 0))
+		or (origem - Vector3.new(0, 3, 0))
+
+	anel(CFrame.new(pe), 7, 0.45)
+	faiscas(origem, 25, 22)
+	mostrarEsquivo()
+	filtroRapido(0.4)
+	piscar(0.25, 0.2)
+	tremer(0.04, 0.25)
+	puloCamera()
+	tocarSom(SOM_ESQUIVO, 1)
+
+	if rastro then
+		rastro.Enabled = true
+	end
+end
+
+local function zerarVelocidade()
+	raiz.AssemblyLinearVelocity = Vector3.zero
+	raiz.AssemblyAngularVelocity = Vector3.zero
+end
+
+local function passoEsquivo(agora)
+	local a = (agora - desvio.inicio) / DURACAO_DESVIO
+
+	if a >= 1 then
+		raiz.CFrame = desvio.para
+		posicaoSegura = desvio.para
+		desvio = nil
+		travadoAte = agora + TEMPO_TRAVA
+
+		task.delay(0.15, function()
+			if rastro and not desvio then
+				rastro.Enabled = false
+			end
+		end)
+	else
+		local e = 1 - (1 - a) ^ 3
+		local volta = desvio.sinal * math.pi * 2 * suave(a)
+		local giro, pulo
+
+		if not ACROBACIA then
+			pulo = math.sin(a * math.pi) * 0.8
+			giro = CFrame.Angles(
+				0,
+				0,
+				desvio.sinal
+					* math.rad(30)
+					* math.sin(a * math.pi)
+			)
+		elseif desvio.eixo == "z" then
+			pulo = math.sin(a * math.pi) * ALTURA_PULO
+			giro = CFrame.Angles(0, 0, volta)
+		elseif desvio.eixo == "x" then
+			pulo = math.sin(a * math.pi) * ALTURA_PULO
+			giro = CFrame.Angles(volta, 0, 0)
+		else
+			pulo = math.sin(a * math.pi) * 1.2
+			giro = CFrame.Angles(0, volta, 0)
+		end
+
+		raiz.CFrame = (
+			desvio.de:Lerp(desvio.para, e)
+			+ Vector3.new(0, pulo, 0)
+		) * giro
+	end
+
+	zerarVelocidade()
+end
+
+--------------------------------------------------
+-- Cancelar fling
+--------------------------------------------------
+local function cancelar()
+	if not raiz or not raiz.Parent
+		or not humanoide or not posicaoSegura then
+		return
+	end
+
+	zerarVelocidade()
+	raiz.CFrame = posicaoSegura
+	humanoide.PlatformStand = false
+
+	local estado = humanoide:GetState()
+
+	if estado == Enum.HumanoidStateType.FallingDown
+		or estado == Enum.HumanoidStateType.Ragdoll
+		or estado == Enum.HumanoidStateType.Physics then
+		humanoide:ChangeState(
+			Enum.HumanoidStateType.GettingUp
+		)
+	end
+end
+
+local function guardarPosicao()
+	posicaoSegura = raiz.CFrame
+
+	if humanoide.FloorMaterial ~= Enum.Material.Air then
+		posicaoChao = raiz.CFrame
+	end
+end
+
+local function checar(dt)
+	if not raiz or not raiz.Parent
+		or not humanoide or humanoide.Health <= 0
+		or not posicaoSegura then
+		return
+	end
+
+	local vel = raiz.AssemblyLinearVelocity
+	local giro = raiz.AssemblyAngularVelocity
+	local pos = raiz.Position
+
+	local quebrado = not (
+		vel.Magnitude < math.huge
+		and giro.Magnitude < math.huge
+		and pos.Magnitude < math.huge
+	)
+
+	if not ligado or humanoide.SeatPart then
+		desvio = nil
+
+		if not quebrado then
+			guardarPosicao()
+		end
+
+		return
+	end
+
+	local agora = os.clock()
+
+	if desvio then
+		passoEsquivo(agora)
+		return
+	end
+
+	local horizontal = Vector3.new(
+		vel.X, 0, vel.Z
+	).Magnitude
+
+	local salto = (pos - posicaoSegura.Position).Magnitude
+
+	local limiteSalto = math.max(
+		SALTO_MAX,
+		(dt or 1 / 60) * SALTO_POR_SEGUNDO + 4
+	)
+
+	local noVoid =
+		pos.Y < workspace.FallenPartsDestroyHeight + MARGEM_VOID
+
+	if not quebrado and not noVoid
+		and salto > limiteSalto
+		and vel.Magnitude < VEL_TELEPORTE
+		and giro.Magnitude < GIRO_MAX then
+		guardarPosicao()
+		travadoAte = 0
+		return
+	end
+
+	local flingado = quebrado
+		or noVoid
+		or horizontal > HORIZONTAL_MAX
+		or vel.Y > SUBIDA_MAX
+		or giro.Magnitude > GIRO_MAX
+
+	if not flingado
+		and agora >= travadoAte
+		and agora - ultimoEfeito > ESPERA_ESQUIVO then
+
+		local flinger = flingerPerto(pos)
+
+		if flinger then
+			ultimoEfeito = agora
+			guardarPosicao()
+			iniciarEsquivo(flinger)
+			return
+		end
+	end
+
+	if flingado then
+		if noVoid and posicaoChao then
+			posicaoSegura = posicaoChao
+		end
+
+		cancelar()
+
+		if agora - ultimoEfeito > ESPERA_ESQUIVO then
+			ultimoEfeito = agora
+			iniciarEsquivo()
+		end
+
+		travadoAte = agora + TEMPO_TRAVA
+
+	elseif agora < travadoAte then
+		cancelar()
+	else
+		guardarPosicao()
+	end
+end
+
+--------------------------------------------------
+-- Bloquear colisão dos flingadores localmente
+--------------------------------------------------
+local colisaoOriginal = setmetatable({}, {__mode = "k"})
+
+local function devolverColisao(char)
+	for _, p in ipairs(char:GetDescendants()) do
+		if colisaoOriginal[p] then
+			p.CanCollide = true
+			colisaoOriginal[p] = nil
+		end
+	end
+end
+
+local function bloquearFlingers()
+	local agora = os.clock()
+
+	if ligado and BLOQUEAR_FLINGER then
+		for _, outro in ipairs(Players:GetPlayers()) do
+			local char = outro ~= jogador and outro.Character
+			local r = char and char:FindFirstChild("HumanoidRootPart")
+
+			if r then
+				local v = r.AssemblyLinearVelocity.Magnitude
+				local g = r.AssemblyAngularVelocity.Magnitude
+
+				if g > GIRO_FLINGER
+					or v > VEL_FLINGER
+					or not (v < math.huge and g < math.huge) then
+					marcados[char] = agora
+				end
+			end
+		end
+	end
+
+	for char, quando in pairs(marcados) do
+		if not char.Parent then
+			marcados[char] = nil
+
+		elseif agora - quando < 2 then
+			for _, p in ipairs(char:GetDescendants()) do
+				if p:IsA("BasePart") and p.CanCollide then
+					colisaoOriginal[p] = true
+					p.CanCollide = false
+				end
+			end
+
+		else
+			devolverColisao(char)
+			marcados[char] = nil
+		end
+	end
+end
+
+--------------------------------------------------
+-- Loop
+--------------------------------------------------
+conectar(RunService.Stepped, bloquearFlingers)
+conectar(RunService.Heartbeat, checar)
+
+--------------------------------------------------
+-- Desligar tudo
+--------------------------------------------------
+_G.AntiFlingEsquivoParar = function()
+	for _, c in ipairs(conexoes) do
+		c:Disconnect()
+	end
+
+	pcall(function()
+		RunService:UnbindFromRenderStep("AF_Esquivo_Desfaz")
+	end)
+
+	pcall(function()
+		RunService:UnbindFromRenderStep("AF_Esquivo_Tremor")
+	end)
+
+	for char in pairs(marcados) do
+		if char.Parent then
+			devolverColisao(char)
+		end
+	end
+
+	if rastro then
+		if rastro.Attachment0 then
+			rastro.Attachment0:Destroy()
+		end
+
+		if rastro.Attachment1 then
+			rastro.Attachment1:Destroy()
+		end
+
+		rastro:Destroy()
+	end
+
+	if humanoide then
+		humanoide:SetStateEnabled(
+			Enum.HumanoidStateType.FallingDown,
+			true
+		)
+
+		humanoide:SetStateEnabled(
+			Enum.HumanoidStateType.Ragdoll,
+			true
+		)
+	end
+
+	pcall(aplicarAnimacoes, false)
+
+	gui:Destroy()
+	_G.AntiFlingEsquivoParar = nil
+end
+
+print(
+	"[Anti-Fling] Carregado! Digite /AuraOn no chat pra ligar e /AuraOff pra desligar."
+)
