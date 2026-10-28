@@ -51,17 +51,17 @@ local TROCAR_ANIMACOES = true
 
 local ANIMACOES_AURA = {
 	idle = {
-		Animation1 = 83498680072055,
-		Animation2 = 83498680072055
-	}, -- Levitation: flutuando parado
+		Animation1 = 656117400,
+		Animation2 = 656118341
+	}, -- Ninja
 
-	walk = 707897309,     -- Mage: andando
-	run = 707861613,      -- Mage: correndo
-	jump = 616115533,     -- Superhero: pulo
-	fall = 616005863,     -- Levitation: caindo flutuando
-	climb = 616104706,    -- Superhero: escalando
-	swim = 616011509,     -- Levitation: nadando
-	swimidle = 616012453, -- Levitation: parado na água
+	walk = 656121766,     -- Ninja: andando
+	run = 656118852,      -- Ninja: correndo
+	jump = 656117878,     -- Ninja: pulo
+	fall = 656115606,     -- Ninja: caindo flutuando
+	climb = 656114359,    -- Ninja: escalando
+	swim = 656119721,     -- Ninja: nadando
+	swimidle = 656121397, -- Ninja: parado na água
 }
 
 --------------------------------------------------
