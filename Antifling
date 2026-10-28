@@ -51,8 +51,8 @@ local TROCAR_ANIMACOES = true
 
 local ANIMACOES_AURA = {
 	idle = {
-		Animation1 = 616006778,
-		Animation2 = 616008087
+		Animation1 = 83498680072055,
+		Animation2 = 83498680072055
 	}, -- Levitation: flutuando parado
 
 	walk = 707897309,     -- Mage: andando
