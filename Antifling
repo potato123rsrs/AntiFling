@@ -1,5 +1,6 @@
--- Anti-Fling + ESQUIVO! (Aura)
--- Digite /AuraOn no chat pra ligar e /AuraOff pra desligar.
+-- Anti-Fling + ESQUIVO! (Aura Ninja)
+-- Já começa ligado. Digite /AuraOff no chat pra desligar e /AuraOn pra ligar de novo.
+-- Também protege e esquiva de blocos do mapa arremessados em você.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -37,15 +38,28 @@ local DURACAO_DESVIO = 0.4
 local ALTURA_PULO = 2.2
 local ACROBACIA = true
 
+local COMECAR_LIGADO = true    -- false = só liga com /AuraOn
+
 local BLOQUEAR_FLINGER = true
+local SEM_COLISAO_JOGADORES = true -- outros jogadores sempre te atravessam
 local GIRO_FLINGER = 50
 local VEL_FLINGER = 250
+
+-- Blocos voando (peças do mapa arremessadas)
+local PROTEGER_PECAS = true    -- false = desliga essa parte
+local ESQUIVAR_PECAS = true    -- false = só atravessa, sem esquivar
+local RAIO_PECAS = 60          -- distância que ele vigia
+local VEL_PECA = 50            -- bloco mais rápido que isso = perigoso
+local GIRO_PECA = 20           -- bloco girando mais que isso = perigoso
+local TEMPO_SEM_COLISAO = 3    -- segundos até o bloco voltar a colidir
+local TEMPO_REACAO = 0.5       -- esquiva se o bloco for chegar em menos que isso
+local DISTANCIA_ACERTO = 7     -- quão perto ele tem que passar pra contar
 
 local COR = Color3.fromRGB(120, 200, 255)
 local SOM_ESQUIVO = ""
 
 --------------------------------------------------
--- ANIMAÇÕES AURA (ATUALIZADAS)
+-- ANIMAÇÕES NINJA (pacote Ninja do catálogo, só R15)
 --------------------------------------------------
 local TROCAR_ANIMACOES = true
 
@@ -53,15 +67,15 @@ local ANIMACOES_AURA = {
 	idle = {
 		Animation1 = 656117400,
 		Animation2 = 656118341
-	}, -- Ninja
+	},                    -- parado
 
-	walk = 656121766,     -- Ninja: andando
-	run = 656118852,      -- Ninja: correndo
-	jump = 656117878,     -- Ninja: pulo
-	fall = 656115606,     -- Ninja: caindo flutuando
-	climb = 656114359,    -- Ninja: escalando
-	swim = 656119721,     -- Ninja: nadando
-	swimidle = 656121397, -- Ninja: parado na água
+	walk = 656121766,     -- andando
+	run = 656118852,      -- correndo
+	jump = 656117878,     -- pulo
+	fall = 656115606,     -- caindo
+	climb = 656114359,    -- escalando
+	swim = 656119721,     -- nadando
+	swimidle = 656121397, -- parado na água
 }
 
 --------------------------------------------------
@@ -74,6 +88,7 @@ local ultimoEfeito = 0
 local travadoAte = 0
 local desvio = nil
 local rastro = nil
+local pecaAmeaca = nil
 local FOV_BASE = workspace.CurrentCamera
 	and workspace.CurrentCamera.FieldOfView or 70
 
@@ -667,6 +682,7 @@ end
 local function novoPersonagem(char)
 	raiz = nil
 	desvio = nil
+	pecaAmeaca = nil
 	personagem = char
 
 	humanoide = char:WaitForChild("Humanoid")
@@ -774,20 +790,39 @@ local function flingerPerto(posicao)
 	return nil
 end
 
-local function iniciarEsquivo(ameacaForcada)
+-- ameacaForcada = personagem de um flinger
+-- peca = bloco voando em sua direção
+local function iniciarEsquivo(ameacaForcada, peca)
 	local de = posicaoSegura
 	local origem = de.Position
-	local ameaca = ameacaForcada or ameacaProxima(origem)
+	local ameaca = nil
+
+	if not peca then
+		ameaca = ameacaForcada or ameacaProxima(origem)
+	end
+
 	local ameacaRaiz = ameaca
 		and ameaca:FindFirstChild("HumanoidRootPart")
 
-	filtrar(ameaca)
+	local ameacaPos = (ameacaRaiz and ameacaRaiz.Position)
+		or (peca and peca.Position)
+
+	filtrar(ameaca or peca)
 
 	local frente
 
-	if ameacaRaiz then
+	-- bloco voando: "frente" é de onde ele está vindo
+	if peca then
+		local v = peca.AssemblyLinearVelocity * Vector3.new(1, 0, 1)
+
+		if v.Magnitude > 0.1 then
+			frente = -v.Unit
+		end
+	end
+
+	if not frente and ameacaPos then
 		local plano = (
-			ameacaRaiz.Position - origem
+			ameacaPos - origem
 		) * Vector3.new(1, 0, 1)
 
 		if plano.Magnitude > 0.1 then
@@ -806,13 +841,38 @@ local function iniciarEsquivo(ameacaForcada)
 	local direita = frente:Cross(Vector3.yAxis)
 	local lado = math.random(0, 1) == 0 and -1 or 1
 
+	-- bloco voando: foge pro lado oposto de onde ele vai passar
+	if peca then
+		local v = peca.AssemblyLinearVelocity
+		local quad = v:Dot(v)
+
+		if quad > 1 then
+			local t = math.max(
+				0,
+				(origem - peca.Position):Dot(v) / quad
+			)
+			local perto = peca.Position + v * t
+			local fuga = (origem - perto) * Vector3.new(1, 0, 1)
+
+			if fuga.Magnitude > 0.1 then
+				lado = direita:Dot(fuga) >= 0 and 1 or -1
+			end
+		end
+	end
+
+	local opcoes = {
+		direita * lado,
+		direita * -lado
+	}
+
+	-- pra trás só contra jogador (contra bloco seria ir junto com ele)
+	if not peca then
+		table.insert(opcoes, -frente)
+	end
+
 	local destino, direcao = origem, nil
 
-	for _, d in ipairs({
-		direita * lado,
-		direita * -lado,
-		-frente
-	}) do
+	for _, d in ipairs(opcoes) do
 		local p = pontoLivre(origem, d, DISTANCIA_DESVIO)
 
 		if p then
@@ -824,11 +884,11 @@ local function iniciarEsquivo(ameacaForcada)
 
 	local alvoOlhar = destino + frente
 
-	if ameacaRaiz then
+	if ameacaPos then
 		alvoOlhar = Vector3.new(
-			ameacaRaiz.Position.X,
+			ameacaPos.X,
 			destino.Y,
-			ameacaRaiz.Position.Z
+			ameacaPos.Z
 		)
 	end
 
@@ -986,6 +1046,10 @@ local function checar(dt)
 	)
 
 	if not ligado or humanoide.SeatPart then
+		if desvio and rastro then
+			rastro.Enabled = false
+		end
+
 		desvio = nil
 
 		if not quebrado then
@@ -1043,6 +1107,15 @@ local function checar(dt)
 			iniciarEsquivo(flinger)
 			return
 		end
+
+		local peca = pecaAmeaca
+
+		if ESQUIVAR_PECAS and peca and peca.Parent then
+			ultimoEfeito = agora
+			guardarPosicao()
+			iniciarEsquivo(nil, peca)
+			return
+		end
 	end
 
 	if flingado then
@@ -1067,9 +1140,10 @@ local function checar(dt)
 end
 
 --------------------------------------------------
--- Bloquear colisão dos flingadores localmente
+-- Tirar colisão de outros jogadores localmente
 --------------------------------------------------
 local colisaoOriginal = setmetatable({}, {__mode = "k"})
+local semColisao = {}
 
 local function devolverColisao(char)
 	for _, p in ipairs(char:GetDescendants()) do
@@ -1083,12 +1157,14 @@ end
 local function bloquearFlingers()
 	local agora = os.clock()
 
-	if ligado and BLOQUEAR_FLINGER then
-		for _, outro in ipairs(Players:GetPlayers()) do
-			local char = outro ~= jogador and outro.Character
-			local r = char and char:FindFirstChild("HumanoidRootPart")
+	for _, outro in ipairs(Players:GetPlayers()) do
+		local char = outro ~= jogador and outro.Character
 
-			if r then
+		if char then
+			local r = char:FindFirstChild("HumanoidRootPart")
+
+			-- marca quem está girando ou rápido demais (flinger)
+			if r and ligado and BLOQUEAR_FLINGER then
 				local v = r.AssemblyLinearVelocity.Magnitude
 				local g = r.AssemblyAngularVelocity.Magnitude
 
@@ -1098,24 +1174,175 @@ local function bloquearFlingers()
 					marcados[char] = agora
 				end
 			end
+
+			local quando = marcados[char]
+
+			if quando and agora - quando >= 2 then
+				marcados[char] = nil
+				quando = nil
+			end
+
+			local bloquear = ligado
+				and (SEM_COLISAO_JOGADORES or quando ~= nil)
+
+			if bloquear then
+				semColisao[char] = true
+
+				for _, p in ipairs(char:GetDescendants()) do
+					if p:IsA("BasePart") and p.CanCollide then
+						colisaoOriginal[p] = true
+						p.CanCollide = false
+					end
+				end
+
+			elseif semColisao[char] then
+				devolverColisao(char)
+				semColisao[char] = nil
+			end
 		end
 	end
 
-	for char, quando in pairs(marcados) do
+	-- limpa personagens que sumiram
+	for char in pairs(marcados) do
 		if not char.Parent then
 			marcados[char] = nil
+		end
+	end
 
-		elseif agora - quando < 2 then
-			for _, p in ipairs(char:GetDescendants()) do
-				if p:IsA("BasePart") and p.CanCollide then
-					colisaoOriginal[p] = true
-					p.CanCollide = false
+	for char in pairs(semColisao) do
+		if not char.Parent then
+			semColisao[char] = nil
+		end
+	end
+end
+
+--------------------------------------------------
+-- Proteção contra blocos voando
+--------------------------------------------------
+-- Blocos rápidos perto de você perdem a colisão SÓ pra você
+-- (os outros continuam vendo e batendo neles normalmente).
+local pecasDesligadas = {}
+
+local vigia = OverlapParams.new()
+vigia.FilterType = Enum.RaycastFilterType.Exclude
+
+local function restaurarPeca(p)
+	local orig = pecasDesligadas[p]
+	pecasDesligadas[p] = nil
+
+	if orig and p.Parent then
+		p.CanCollide = orig.collide
+		p.CanTouch = orig.touch
+	end
+end
+
+local function desligarPeca(p, agora)
+	local orig = pecasDesligadas[p]
+
+	if orig then
+		-- ainda perigoso: estende o tempo
+		orig.ate = agora + TEMPO_SEM_COLISAO
+		return
+	end
+
+	pecasDesligadas[p] = {
+		collide = p.CanCollide,
+		touch = p.CanTouch,
+		ate = agora + TEMPO_SEM_COLISAO
+	}
+
+	p.CanCollide = false
+	p.CanTouch = false
+end
+
+local function vigiarPecas()
+	local agora = os.clock()
+
+	-- devolve a colisão dos blocos que já passaram
+	-- e mantém desligada a dos que ainda estão no tempo
+	for p, orig in pairs(pecasDesligadas) do
+		if not p.Parent or agora >= orig.ate or not ligado then
+			restaurarPeca(p)
+		else
+			p.CanCollide = false
+			p.CanTouch = false
+		end
+	end
+
+	pecaAmeaca = nil
+
+	if not ligado or not PROTEGER_PECAS then return end
+
+	if not raiz or not raiz.Parent or not personagem
+		or not humanoide or humanoide.Health <= 0 then
+		return
+	end
+
+	vigia.FilterDescendantsInstances = {personagem}
+
+	-- corpo dos jogadores já é tratado acima, mas peças soltas
+	-- deles (chapéu/acessório usado pra fling) são vigiadas aqui
+	local corpos = {}
+
+	for _, outro in ipairs(Players:GetPlayers()) do
+		local char = outro.Character
+		local r = char and char:FindFirstChild("HumanoidRootPart")
+		local base = r and r.AssemblyRootPart
+
+		if base then
+			corpos[base] = true
+		end
+	end
+
+	local minhaRaiz = raiz.AssemblyRootPart
+	local minhaPos = raiz.Position
+	local minhaVel = raiz.AssemblyLinearVelocity
+	local podeEsquivar = not desvio and not humanoide.SeatPart
+	local melhorT = TEMPO_REACAO
+
+	local pecas = workspace:GetPartBoundsInRadius(
+		minhaPos,
+		RAIO_PECAS,
+		vigia
+	)
+
+	for _, p in ipairs(pecas) do
+		-- ignora peças presas, corpos de jogadores
+		-- e o veículo em que você está
+		if not p.Anchored
+			and p.AssemblyRootPart ~= minhaRaiz
+			and not corpos[p.AssemblyRootPart]
+			and not colisaoOriginal[p] then
+			local v = p.AssemblyLinearVelocity
+			local velP = v.Magnitude
+			local rapida = velP > VEL_PECA or not (velP < math.huge)
+
+			if rapida
+				or p.AssemblyAngularVelocity.Magnitude > GIRO_PECA then
+
+				desligarPeca(p, agora)
+
+				-- prevê se vai te acertar
+				if rapida and podeEsquivar then
+					local rel = v - minhaVel
+					local quad = rel:Dot(rel)
+
+					if quad > 1 and quad < math.huge then
+						local t = (minhaPos - p.Position):Dot(rel) / quad
+
+						if t > 0 and t < melhorT then
+							local perto = p.Position + rel * t
+							local alcance = DISTANCIA_ACERTO
+								+ p.Size.Magnitude / 2
+
+							if (perto - minhaPos).Magnitude < alcance then
+								melhorT = t
+								pecaAmeaca = p
+							end
+						end
+					end
 				end
 			end
-
-		else
-			devolverColisao(char)
-			marcados[char] = nil
 		end
 	end
 end
@@ -1123,7 +1350,13 @@ end
 --------------------------------------------------
 -- Loop
 --------------------------------------------------
-conectar(RunService.Stepped, bloquearFlingers)
+-- Stepped roda ANTES da física: a colisão é desligada
+-- antes do bloco ou do flinger ter chance de te acertar
+conectar(RunService.Stepped, function()
+	bloquearFlingers()
+	vigiarPecas()
+end)
+
 conectar(RunService.Heartbeat, checar)
 
 --------------------------------------------------
@@ -1142,10 +1375,14 @@ _G.AntiFlingEsquivoParar = function()
 		RunService:UnbindFromRenderStep("AF_Esquivo_Tremor")
 	end)
 
-	for char in pairs(marcados) do
+	for char in pairs(semColisao) do
 		if char.Parent then
 			devolverColisao(char)
 		end
+	end
+
+	for p in pairs(pecasDesligadas) do
+		restaurarPeca(p)
 	end
 
 	if rastro then
@@ -1178,6 +1415,10 @@ _G.AntiFlingEsquivoParar = function()
 	_G.AntiFlingEsquivoParar = nil
 end
 
+if COMECAR_LIGADO then
+	definirAura(true)
+end
+
 print(
-	"[Anti-Fling] Carregado! Digite /AuraOn no chat pra ligar e /AuraOff pra desligar."
+	"[Anti-Fling] Carregado e ligado! /AuraOff no chat pra desligar, /AuraOn pra ligar."
 )
